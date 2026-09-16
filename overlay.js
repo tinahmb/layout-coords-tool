@@ -37,7 +37,6 @@
   };
   const enabled = { buttons: true, images: true, text: false, containers: false };
 
-  // Elements the user has locked against further edits. Keyed by element ref via a WeakSet.
   const lockedEls = new WeakSet();
 
   // ============================================================
@@ -73,21 +72,24 @@
   });
   document.getElementById('layout-tool-close').addEventListener('click', teardown);
 
-  // Minimize: collapses body, panel shrinks to just the header pill.
-  let panelMinimized = false;
+  // Panel starts minimized by default now — it only needs to be open to
+  // change category filters, and staying open permanently is exactly what
+  // was crowding the screen and colliding with the toolbar.
+  let panelMinimized = true;
   const panelBody = panel.querySelector('#lt-panel-body');
   const panelMinBtn = panel.querySelector('#lt-panel-min');
-  panelMinBtn.addEventListener('click', () => {
-    panelMinimized = !panelMinimized;
+  function applyPanelMinState() {
     panelBody.style.display = panelMinimized ? 'none' : 'block';
     panelMinBtn.textContent = panelMinimized ? '□' : '–';
     panel.style.minWidth = panelMinimized ? 'unset' : '150px';
+  }
+  applyPanelMinState();
+  panelMinBtn.addEventListener('click', () => {
+    panelMinimized = !panelMinimized;
+    applyPanelMinState();
   });
 
-  // Drag the panel by its header. Position switches to left/top so dragging feels natural.
-  makeDraggable(panel, panel.querySelector('#lt-panel-header'), () => {
-    // no-op on move; panel repositions itself via left/top below
-  });
+  makeDraggable(panel, panel.querySelector('#lt-panel-header'));
 
   function isSelectable(el) {
     return Object.keys(CATEGORIES).some(key =>
@@ -98,16 +100,18 @@
   // ============================================================
   // 3. Selection state
   // ============================================================
-  // selection = { el, stack, stackIndex, offsetX, offsetY }
   let selection = null;
   let lastTap = null;
   let resultCard = null;
+  let isDragging = false; // true during move or resize — suppresses full rebuilds
 
   const highlightBox = document.createElement('div');
   Object.assign(highlightBox.style, {
     position: 'fixed', pointerEvents: 'none', border: `2px solid ${ACCENT}`,
     background: 'rgba(79,157,255,0.10)', zIndex: 2147483646, display: 'none',
-    borderRadius: '3px', transition: 'top 0.05s, left 0.05s, width 0.05s, height 0.05s'
+    borderRadius: '3px'
+    // No CSS transition here on purpose — during drag we update every frame,
+    // and a transition fights the pointer, which reads as "laggy / imprecise".
   });
   document.body.appendChild(highlightBox);
 
@@ -117,16 +121,24 @@
     position: 'fixed', zIndex: 2147483647, display: 'none',
     padding: '8px 10px', fontSize: '12px', userSelect: 'none',
     maxWidth: '260px'
-    // touch-action deliberately NOT set here — only on the move handle —
-    // so it doesn't suppress taps on Font +/-, Lock, or Get CSS buttons.
   });
   glassify(toolbar);
   document.body.appendChild(toolbar);
 
-  // Corner resize handle
+  // Small pill shown INSTEAD of the full toolbar while dragging/resizing —
+  // just enough feedback (size or offset) without blocking the view or the finger.
+  const dragBadge = document.createElement('div');
+  Object.assign(dragBadge.style, {
+    position: 'fixed', zIndex: 2147483647, display: 'none',
+    padding: '3px 8px', fontSize: '11px', pointerEvents: 'none',
+    borderRadius: '8px'
+  });
+  glassify(dragBadge);
+  document.body.appendChild(dragBadge);
+
   const resizeHandle = document.createElement('div');
   Object.assign(resizeHandle.style, {
-    position: 'fixed', zIndex: 2147483647, width: '14px', height: '14px',
+    position: 'fixed', zIndex: 2147483647, width: '18px', height: '18px',
     borderRadius: '50%', background: ACCENT, border: '2px solid rgba(255,255,255,0.9)',
     display: 'none', cursor: 'nwse-resize', touchAction: 'none',
     boxShadow: '0 2px 6px rgba(0,0,0,0.35)'
@@ -178,13 +190,12 @@
   function clearSelection() {
     highlightBox.style.display = 'none';
     toolbar.style.display = 'none';
+    dragBadge.style.display = 'none';
     resizeHandle.style.display = 'none';
     selection = null;
   }
 
   function selectElement(el, stack, index) {
-    // Preserve an in-progress offset if we're just re-selecting the same element
-    // (e.g. clicking it again in the layers bar) so we don't reset its position.
     const keepOffset = selection && selection.el === el;
     selection = {
       el, stack, stackIndex: index,
@@ -203,7 +214,11 @@
     return `${el.tagName.toLowerCase()}${el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''}`;
   }
 
-  function renderSelectionUI() {
+  // ---- Cheap path: called on every pointermove during drag/resize.
+  // Only moves things that already exist — never touches innerHTML,
+  // never re-attaches listeners. This is what fixes the stutter/"getting stuck".
+  function positionOverlays() {
+    if (!selection) return;
     const el = selection.el;
     const rect = el.getBoundingClientRect();
     const locked = lockedEls.has(el);
@@ -216,12 +231,38 @@
     });
 
     Object.assign(resizeHandle.style, {
-      display: locked ? 'none' : 'block',
-      top: (rect.bottom - 7) + 'px',
-      left: (rect.right - 7) + 'px'
+      top: (rect.bottom - 9) + 'px',
+      left: (rect.right - 9) + 'px'
     });
 
-    // ---- Layers bar: every selectable element under this spot, clickable ----
+    return rect;
+  }
+
+  function clampToolbarPosition(rect) {
+    // Keep clear of the settings panel's own bounding box, not just the viewport edge.
+    const panelRect = panel.getBoundingClientRect();
+    let top = rect.top - toolbar.offsetHeight - 14;
+    let left = Math.min(Math.max(8, rect.left), window.innerWidth - 270);
+
+    if (top < 8) {
+      // Not enough room above the element — place it below instead.
+      top = rect.bottom + 14;
+    }
+    // If it still collides with the panel's box, nudge it below the panel.
+    const wouldOverlapPanel =
+      left < panelRect.right && left + 260 > panelRect.left &&
+      top < panelRect.bottom && top + toolbar.offsetHeight > panelRect.top;
+    if (wouldOverlapPanel && !panelMinimized) {
+      top = panelRect.bottom + 10;
+    }
+    return { top, left };
+  }
+
+  function renderSelectionUI() {
+    const el = selection.el;
+    const rect = positionOverlays();
+    const locked = lockedEls.has(el);
+
     let layersBarHtml = '';
     if (selection.stack.length > 1) {
       layersBarHtml = `
@@ -245,7 +286,7 @@
       </div>
       ${layersBarHtml}
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
-        <span id="lt-move-handle" style="cursor:${locked ? 'not-allowed' : 'grab'};padding:4px 8px;background:rgba(255,255,255,0.08);border-radius:6px;touch-action:none;opacity:${locked ? '0.4' : '1'};">✥ Move</span>
+        <span id="lt-move-handle" style="cursor:${locked ? 'not-allowed' : 'grab'};padding:6px 10px;background:rgba(255,255,255,0.08);border-radius:6px;touch-action:none;opacity:${locked ? '0.4' : '1'};">✥ Move</span>
         <span style="opacity:0.6;">Font</span>
         <button id="lt-font-minus" style="padding:2px 8px;" ${locked ? 'disabled' : ''}>−</button>
         <button id="lt-font-plus" style="padding:2px 8px;" ${locked ? 'disabled' : ''}>+</button>
@@ -255,11 +296,9 @@
     `;
     styleButtons(toolbar);
 
-    Object.assign(toolbar.style, {
-      display: 'block',
-      top: Math.max(8, rect.top - toolbar.offsetHeight - 14) + 'px',
-      left: Math.min(Math.max(8, rect.left), window.innerWidth - 270) + 'px'
-    });
+    const pos = clampToolbarPosition(rect);
+    Object.assign(toolbar.style, { display: 'block', top: pos.top + 'px', left: pos.left + 'px' });
+    resizeHandle.style.display = locked ? 'none' : 'block';
 
     if (selection.stack.length > 1) {
       toolbar.querySelectorAll('[data-layer-index]').forEach(pill => {
@@ -287,7 +326,7 @@
   }
 
   // ============================================================
-  // 5. Move (via dedicated handle only; blocked when locked)
+  // 5. Move — toolbar hides, only a small badge + highlight box track the finger
   // ============================================================
   function startMove(e) {
     if (lockedEls.has(selection.el)) return;
@@ -299,23 +338,34 @@
     const baseX = selection.offsetX, baseY = selection.offsetY;
     document.body.style.userSelect = 'none';
 
+    isDragging = true;
+    toolbar.style.display = 'none';
+    dragBadge.style.display = 'block';
+
     function move(ev) {
       selection.offsetX = baseX + (ev.clientX - startX);
       selection.offsetY = baseY + (ev.clientY - startY);
       el.style.transform = `translate(${selection.offsetX}px, ${selection.offsetY}px)`;
-      renderSelectionUI();
+      const rect = positionOverlays(); // cheap — no innerHTML rebuild
+      dragBadge.textContent = `${Math.round(selection.offsetX)}, ${Math.round(selection.offsetY)}`;
+      // Keep the badge near the finger but offset so it doesn't sit under it.
+      dragBadge.style.top = (ev.clientY - 34) + 'px';
+      dragBadge.style.left = Math.min(Math.max(8, ev.clientX + 12), window.innerWidth - 90) + 'px';
     }
     function up() {
       document.removeEventListener('pointermove', move);
       document.removeEventListener('pointerup', up);
       document.body.style.userSelect = '';
+      isDragging = false;
+      dragBadge.style.display = 'none';
+      renderSelectionUI(); // one full rebuild, now that dragging is done
     }
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
   }
 
   // ============================================================
-  // 6. Resize (corner handle; blocked when locked)
+  // 6. Resize — same pattern: badge instead of full toolbar while dragging
   // ============================================================
   function startResize(e) {
     if (lockedEls.has(selection.el)) return;
@@ -326,24 +376,34 @@
     const startRect = el.getBoundingClientRect();
     document.body.style.userSelect = 'none';
 
+    isDragging = true;
+    toolbar.style.display = 'none';
+    dragBadge.style.display = 'block';
+
     function move(ev) {
       const newW = Math.max(10, Math.round(startRect.width + (ev.clientX - startX)));
       const newH = Math.max(10, Math.round(startRect.height + (ev.clientY - startY)));
       el.style.width = newW + 'px';
       el.style.height = newH + 'px';
-      renderSelectionUI();
+      positionOverlays(); // cheap
+      dragBadge.textContent = `${newW} × ${newH}`;
+      dragBadge.style.top = (ev.clientY - 34) + 'px';
+      dragBadge.style.left = Math.min(Math.max(8, ev.clientX + 12), window.innerWidth - 90) + 'px';
     }
     function up() {
       document.removeEventListener('pointermove', move);
       document.removeEventListener('pointerup', up);
       document.body.style.userSelect = '';
+      isDragging = false;
+      dragBadge.style.display = 'none';
+      renderSelectionUI();
     }
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
   }
 
   // ============================================================
-  // 7. Font size stepper (blocked when locked)
+  // 7. Font size stepper
   // ============================================================
   function adjustFontSize(deltaPx) {
     if (lockedEls.has(selection.el)) return;
@@ -404,7 +464,7 @@
   }
 
   // ============================================================
-  // 9. Shared helpers: button styling + generic draggable-by-handle
+  // 9. Shared helpers
   // ============================================================
   function styleButtons(container) {
     container.querySelectorAll('button').forEach(btn => {
@@ -421,13 +481,10 @@
     });
   }
 
-  // Makes `el` draggable by pointer-dragging `handle`. Repositions `el` using
-  // fixed top/left (clearing right/bottom so it doesn't fight itself).
   function makeDraggable(el, handle) {
     handle.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       const rect = el.getBoundingClientRect();
-      // Switch from right-anchored to left/top-anchored before dragging.
       el.style.left = rect.left + 'px';
       el.style.top = rect.top + 'px';
       el.style.right = 'auto';
@@ -460,6 +517,7 @@
     panel.remove();
     highlightBox.remove();
     toolbar.remove();
+    dragBadge.remove();
     resizeHandle.remove();
     if (resultCard) { resultCard.remove(); resultCard = null; }
     document.removeEventListener('pointerdown', onPageTap, true);
