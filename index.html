@@ -108,7 +108,10 @@
     </p>
   </div>
 
-  <!-- TOUCH VERSION (iPad/iPhone/tablets) -->
+  <!-- TOUCH VERSION (iPad/iPhone/tablets) — kept browser-agnostic since
+       the copy-and-edit-a-bookmark method works the same way across
+       Safari, Chrome, and most other mobile browsers, just with slightly
+       different menu names/icons. -->
   <div id="touch-instructions">
     <div class="bookmarklet-box">
       <button class="copy-btn" id="copy-code-btn">Copy bookmarklet code</button>
@@ -116,16 +119,20 @@
 
     <ol class="steps">
       <li>Tap "Copy bookmarklet code" above. This copies a short <code class="inline">javascript:</code> snippet to your clipboard.</li>
-      <li>Open Safari, go to any page, tap the <strong>Share</strong> icon, then tap <strong>Add Bookmark</strong> → <strong>Save</strong>.</li>
-      <li>Tap the <strong>Bookmarks</strong> icon (open book) → find the bookmark you just saved → swipe left on it (or tap <strong>Edit</strong> in the top right) → tap <strong>Edit</strong>.</li>
+      <li>Open your browser, go to any page, and bookmark it (usually the Share icon, or a star/bookmark icon in the address bar, then <strong>Add Bookmark</strong> or <strong>Save</strong>).</li>
+      <li>Open your browser's <strong>Bookmarks</strong> list, find the bookmark you just saved, and open it for editing (swipe left on it, or use the <strong>Edit</strong> option — exact wording varies by browser).</li>
       <li>Clear the <strong>URL</strong> field completely, then paste the copied code into it (long-press → Paste).</li>
-      <li>Change the <strong>Name</strong> field to <code class="inline">Layout Tool</code>, then tap <strong>Done</strong>.</li>
-      <li>Open the page you're working on, tap the Bookmarks icon, and tap <strong>Layout Tool</strong>. The panel appears in the corner.</li>
+      <li>Change the <strong>Name</strong> field to <code class="inline">Layout Tool</code>, then save/confirm.</li>
+      <li>Open the page you're working on, open your Bookmarks, and tap <strong>Layout Tool</strong>. The panel appears in the corner.</li>
       <li>Tap any button, image, or container to select it. Tap the same spot again to cycle to the element underneath.</li>
       <li>Use the Move handle or the resize dot to adjust it, then tap "Get CSS" to copy the resulting rule.</li>
       <li>Paste that CSS into your code, or hand it to your AI coding agent.</li>
       <li>Tap "Remove tool" when done, or reload the page. Nothing persists.</li>
     </ol>
+
+    <p style="font-size:13px;color:#777;">
+      Steps above work the same way in Chrome, Safari, and most other mobile browsers — only the exact menu names and icons differ slightly.
+    </p>
   </div>
 
   <div class="alt-method">
