@@ -53,6 +53,10 @@
   let selection = null;
   let lastTap = null; // { x, y, time } — used to detect "tap same spot again" for layer cycling
 
+  // Result card is declared up here (rather than down in section 8) so the
+  // tap-ignore checks in section 4 can reference it safely regardless of call order.
+  let resultCard = null;
+
   const highlightBox = document.createElement('div');
   Object.assign(highlightBox.style, {
     position: 'fixed', pointerEvents: 'none', border: '2px solid #4f9dff',
@@ -66,7 +70,11 @@
     position: 'fixed', zIndex: 2147483647, display: 'none',
     background: '#1e1e1e', color: '#fff', borderRadius: '8px',
     padding: '8px 10px', fontFamily: 'system-ui, sans-serif', fontSize: '12px',
-    boxShadow: '0 4px 16px rgba(0,0,0,0.3)', touchAction: 'none', userSelect: 'none'
+    boxShadow: '0 4px 16px rgba(0,0,0,0.3)', userSelect: 'none'
+    // NOTE: touch-action: none intentionally NOT set here anymore (Bug 2 fix).
+    // It was blanket-suppressing tap/click on nested buttons (Font +/-, Get CSS)
+    // on touch devices. It now lives only on the #lt-move-handle element below,
+    // which is the only thing that actually needs to block scroll gestures.
   });
   document.body.appendChild(toolbar);
 
@@ -85,10 +93,21 @@
   // this is what solves "I can't get to the element under this one."
   document.addEventListener('pointerdown', onPageTap, true);
 
+  // Shared helper: is this event target part of our own UI (panel, toolbar,
+  // resize handle, or the result card)? Bug 1 fix: result card is now included,
+  // so tapping "Dismiss" (a <button>) doesn't get reinterpreted as selecting
+  // a new page element.
+  function isOwnUI(target) {
+    return panel.contains(target) ||
+      toolbar.contains(target) ||
+      target === resizeHandle ||
+      (resultCard && resultCard.contains(target));
+  }
+
   let tapStart = null;
   function onPageTap(e) {
     // Ignore taps on our own UI
-    if (panel.contains(e.target) || toolbar.contains(e.target) || e.target === resizeHandle) return;
+    if (isOwnUI(e.target)) return;
     tapStart = { x: e.clientX, y: e.clientY, target: e.target };
   }
   document.addEventListener('pointerup', onPageTapEnd, true);
@@ -99,7 +118,7 @@
     tapStart = null;
     // If they moved more than a few px, it was a scroll/gesture, not a tap — ignore.
     if (dx > 6 || dy > 6) return;
-    if (panel.contains(e.target) || toolbar.contains(e.target) || e.target === resizeHandle) return;
+    if (isOwnUI(e.target)) return;
 
     const point = { x: e.clientX, y: e.clientY };
     const stack = document.elementsFromPoint(point.x, point.y).filter(isSelectable);
@@ -179,7 +198,8 @@
     });
 
     // Move handle — dragging THIS (not the element directly) starts the move.
-    // This is what stops normal page scrolling from being hijacked elsewhere.
+    // touch-action:none lives ONLY on this element (inline style above), so it
+    // blocks scroll-gestures during a drag without affecting sibling buttons.
     const moveHandle = toolbar.querySelector('#lt-move-handle');
     moveHandle.addEventListener('pointerdown', startMove);
 
@@ -249,7 +269,6 @@
   }
 
   // ---- 8. Result card: final CSS, aware of position/size/font changes ----
-  let resultCard = null;
   function showResultCard() {
     if (resultCard) resultCard.remove();
     const el = selection.el;
@@ -303,7 +322,7 @@
     highlightBox.remove();
     toolbar.remove();
     resizeHandle.remove();
-    if (resultCard) resultCard.remove();
+    if (resultCard) { resultCard.remove(); resultCard = null; }
     document.removeEventListener('pointerdown', onPageTap, true);
     document.removeEventListener('pointerup', onPageTapEnd, true);
 
