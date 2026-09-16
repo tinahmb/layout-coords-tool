@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  // Avoid double-injection if the user clicks the bookmarklet twice
   if (window.__layoutToolActive) {
     console.log('Layout tool already active.');
     return;
@@ -9,20 +8,15 @@
   window.__layoutToolActive = true;
 
   // ---- 1. Category definitions ----
-  // Each category maps a human label to a CSS selector.
-  // This is what powers the checkboxes ("Buttons", "Images", etc.)
   const CATEGORIES = {
     buttons: { label: 'Buttons', selector: 'button, [role="button"], input[type="submit"], input[type="button"], a.btn, a.button' },
     images: { label: 'Images', selector: 'img, svg, picture, canvas' },
     text: { label: 'Text', selector: 'p, span, h1, h2, h3, h4, h5, h6, a:not([role="button"])' },
     containers: { label: 'Containers', selector: 'div, section, header, footer, nav, main, aside, article' }
   };
-
-  // Track which categories are enabled. Buttons + Images default ON,
-  // matching the example we sketched earlier.
   const enabled = { buttons: true, images: true, text: false, containers: false };
 
-  // ---- 2. Build the floating control panel ----
+  // ---- 2. Control panel (category toggles) ----
   const panel = document.createElement('div');
   panel.id = 'layout-tool-panel';
   panel.innerHTML = `
@@ -36,276 +30,293 @@
     <button id="layout-tool-close" style="margin-top:8px;font-size:12px;">Remove tool</button>
   `;
   Object.assign(panel.style, {
-    position: 'fixed',
-    top: '12px',
-    right: '12px',
-    zIndex: 2147483647, // stay on top of the host page's own UI
-    background: '#1e1e1e',
-    color: '#fff',
-    padding: '10px 12px',
-    borderRadius: '8px',
-    fontFamily: 'system-ui, sans-serif',
+    position: 'fixed', top: '12px', right: '12px', zIndex: 2147483647,
+    background: '#1e1e1e', color: '#fff', padding: '10px 12px',
+    borderRadius: '8px', fontFamily: 'system-ui, sans-serif',
     boxShadow: '0 4px 16px rgba(0,0,0,0.3)'
   });
   document.body.appendChild(panel);
-
-  // Wire up checkboxes to the `enabled` map
   panel.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-    cb.addEventListener('change', () => {
-      enabled[cb.dataset.cat] = cb.checked;
-    });
+    cb.addEventListener('change', () => { enabled[cb.dataset.cat] = cb.checked; });
   });
-
-  // "Remove tool" — full teardown, leaves zero trace (our "no risk" promise)
   document.getElementById('layout-tool-close').addEventListener('click', teardown);
 
-  function teardown() {
-    panel.remove();
-    if (highlightBox) highlightBox.remove();
-    if (resultCard) resultCard.remove();
-    document.removeEventListener('mouseover', onHover);
-    document.removeEventListener('pointerdown', onPointerDown, true);
-    if (dragState) {
-      dragState.el.removeEventListener('pointermove', onPointerMove);
-      dragState.el.removeEventListener('pointerup', onPointerUp);
-      dragState.el.removeEventListener('pointercancel', onPointerUp);
+  function isSelectable(el) {
+    return Object.keys(CATEGORIES).some(key =>
+      enabled[key] && el instanceof Element && el.matches(CATEGORIES[key].selector)
+    );
+  }
+
+  // ---- 3. Selection state ----
+  // selection = { el, stack, stackIndex, origTransform, origWidth, origHeight,
+  //               origFontSize, offsetX, offsetY }
+  let selection = null;
+  let lastTap = null; // { x, y, time } — used to detect "tap same spot again" for layer cycling
+
+  const highlightBox = document.createElement('div');
+  Object.assign(highlightBox.style, {
+    position: 'fixed', pointerEvents: 'none', border: '2px solid #4f9dff',
+    background: 'rgba(79,157,255,0.12)', zIndex: 2147483646, display: 'none'
+  });
+  document.body.appendChild(highlightBox);
+
+  const toolbar = document.createElement('div');
+  toolbar.id = 'layout-tool-toolbar';
+  Object.assign(toolbar.style, {
+    position: 'fixed', zIndex: 2147483647, display: 'none',
+    background: '#1e1e1e', color: '#fff', borderRadius: '8px',
+    padding: '8px 10px', fontFamily: 'system-ui, sans-serif', fontSize: '12px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.3)', touchAction: 'none', userSelect: 'none'
+  });
+  document.body.appendChild(toolbar);
+
+  // Corner resize handle — a small dot the user drags to change width/height
+  const resizeHandle = document.createElement('div');
+  Object.assign(resizeHandle.style, {
+    position: 'fixed', zIndex: 2147483647, width: '14px', height: '14px',
+    borderRadius: '50%', background: '#4f9dff', border: '2px solid #fff',
+    display: 'none', cursor: 'nwse-resize', touchAction: 'none'
+  });
+  document.body.appendChild(resizeHandle);
+
+  // ---- 4. Tap-to-select + layer cycling ----
+  // A plain tap (no drag) on the page selects whatever's under the finger/cursor.
+  // Tapping the SAME spot again cycles to the next element stacked underneath —
+  // this is what solves "I can't get to the element under this one."
+  document.addEventListener('pointerdown', onPageTap, true);
+
+  let tapStart = null;
+  function onPageTap(e) {
+    // Ignore taps on our own UI
+    if (panel.contains(e.target) || toolbar.contains(e.target) || e.target === resizeHandle) return;
+    tapStart = { x: e.clientX, y: e.clientY, target: e.target };
+  }
+  document.addEventListener('pointerup', onPageTapEnd, true);
+  function onPageTapEnd(e) {
+    if (!tapStart) return;
+    const dx = Math.abs(e.clientX - tapStart.x);
+    const dy = Math.abs(e.clientY - tapStart.y);
+    tapStart = null;
+    // If they moved more than a few px, it was a scroll/gesture, not a tap — ignore.
+    if (dx > 6 || dy > 6) return;
+    if (panel.contains(e.target) || toolbar.contains(e.target) || e.target === resizeHandle) return;
+
+    const point = { x: e.clientX, y: e.clientY };
+    const stack = document.elementsFromPoint(point.x, point.y).filter(isSelectable);
+    if (stack.length === 0) {
+      clearSelection();
+      return;
     }
 
-    // Restore any element still showing a drag-preview transform, so the
-    // page returns to exactly how it looked before the tool was added.
-    document.querySelectorAll('[data-layout-tool-orig-transform]').forEach(el => {
-      el.style.transform = el.dataset.layoutToolOrigTransform;
-      delete el.dataset.layoutToolOrigTransform;
-      el.style.cursor = '';
-      el.style.touchAction = '';
+    const sameSpot = lastTap && Math.abs(lastTap.x - point.x) < 8 && Math.abs(lastTap.y - point.y) < 8;
+    let index = 0;
+    if (sameSpot && selection && stack.includes(selection.el)) {
+      index = (stack.indexOf(selection.el) + 1) % stack.length;
+    }
+    lastTap = { x: point.x, y: point.y };
+    selectElement(stack[index], stack, index);
+  }
+
+  function clearSelection() {
+    highlightBox.style.display = 'none';
+    toolbar.style.display = 'none';
+    resizeHandle.style.display = 'none';
+    selection = null;
+  }
+
+  function selectElement(el, stack, index) {
+    selection = {
+      el, stack, stackIndex: index,
+      origTransform: el.style.transform || '',
+      origWidth: el.style.width || '',
+      origHeight: el.style.height || '',
+      origFontSize: el.style.fontSize || '',
+      offsetX: 0, offsetY: 0
+    };
+    markTemp(el);
+    renderSelectionUI();
+  }
+
+  // Track which elements we've temporarily modified, so teardown can revert them all.
+  function markTemp(el) {
+    if (!el.dataset.layoutToolTouched) el.dataset.layoutToolTouched = '1';
+  }
+
+  function renderSelectionUI() {
+    const el = selection.el;
+    const rect = el.getBoundingClientRect();
+
+    Object.assign(highlightBox.style, {
+      display: 'block', top: rect.top + 'px', left: rect.left + 'px',
+      width: rect.width + 'px', height: rect.height + 'px'
+    });
+
+    Object.assign(resizeHandle.style, {
+      display: 'block',
+      top: (rect.bottom - 7) + 'px',
+      left: (rect.right - 7) + 'px'
+    });
+
+    const layerInfo = selection.stack.length > 1
+      ? `Layer ${selection.stackIndex + 1}/${selection.stack.length} — tap same spot for next`
+      : '';
+
+    toolbar.innerHTML = `
+      <div style="font-weight:600;margin-bottom:4px;">&lt;${el.tagName.toLowerCase()}${el.className ? '.' + String(el.className).split(' ')[0] : ''}&gt;</div>
+      ${layerInfo ? `<div style="opacity:0.7;margin-bottom:6px;">${layerInfo}</div>` : ''}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span id="lt-move-handle" style="cursor:grab;padding:4px 8px;background:#333;border-radius:4px;touch-action:none;">✥ Move</span>
+        <span>Font:</span>
+        <button id="lt-font-minus" style="padding:2px 8px;">−</button>
+        <button id="lt-font-plus" style="padding:2px 8px;">+</button>
+      </div>
+      <button id="lt-get-css" style="font-size:12px;">Get CSS</button>
+    `;
+    Object.assign(toolbar.style, {
+      display: 'block',
+      top: Math.max(8, rect.top - 78) + 'px',
+      left: Math.min(rect.left, window.innerWidth - 220) + 'px'
+    });
+
+    // Move handle — dragging THIS (not the element directly) starts the move.
+    // This is what stops normal page scrolling from being hijacked elsewhere.
+    const moveHandle = toolbar.querySelector('#lt-move-handle');
+    moveHandle.addEventListener('pointerdown', startMove);
+
+    toolbar.querySelector('#lt-font-minus').addEventListener('click', () => adjustFontSize(-1));
+    toolbar.querySelector('#lt-font-plus').addEventListener('click', () => adjustFontSize(1));
+    toolbar.querySelector('#lt-get-css').addEventListener('click', showResultCard);
+
+    resizeHandle.onpointerdown = startResize;
+  }
+
+  // ---- 5. Move (via dedicated handle only) ----
+  function startMove(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const el = selection.el;
+    el.setPointerCapture && e.target.setPointerCapture(e.pointerId);
+    const startX = e.clientX, startY = e.clientY;
+    const baseX = selection.offsetX, baseY = selection.offsetY;
+    document.body.style.userSelect = 'none';
+
+    function move(ev) {
+      selection.offsetX = baseX + (ev.clientX - startX);
+      selection.offsetY = baseY + (ev.clientY - startY);
+      el.style.transform = `translate(${selection.offsetX}px, ${selection.offsetY}px)`;
+      renderSelectionUI();
+    }
+    function up(ev) {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+  }
+
+  // ---- 6. Resize (corner handle: width + height together) ----
+  function startResize(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const el = selection.el;
+    const startX = e.clientX, startY = e.clientY;
+    const startRect = el.getBoundingClientRect();
+    document.body.style.userSelect = 'none';
+
+    function move(ev) {
+      const newW = Math.max(10, Math.round(startRect.width + (ev.clientX - startX)));
+      const newH = Math.max(10, Math.round(startRect.height + (ev.clientY - startY)));
+      el.style.width = newW + 'px';
+      el.style.height = newH + 'px';
+      renderSelectionUI();
+    }
+    function up(ev) {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.body.style.userSelect = '';
+    }
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+  }
+
+  // ---- 7. Font size stepper ----
+  function adjustFontSize(deltaPx) {
+    const el = selection.el;
+    const current = parseFloat(getComputedStyle(el).fontSize) || 16;
+    el.style.fontSize = Math.max(1, current + deltaPx) + 'px';
+    renderSelectionUI();
+  }
+
+  // ---- 8. Result card: final CSS, aware of position/size/font changes ----
+  let resultCard = null;
+  function showResultCard() {
+    if (resultCard) resultCard.remove();
+    const el = selection.el;
+    const style = getComputedStyle(el);
+    const isPositioned = style.position !== 'static';
+    const rect = el.getBoundingClientRect();
+
+    const lines = [];
+    if (selection.offsetX || selection.offsetY) {
+      if (isPositioned) {
+        lines.push(`top: ${Math.round(rect.top)}px;\nleft: ${Math.round(rect.left)}px;`);
+      } else {
+        lines.push(`margin-top: ${Math.round(selection.offsetY)}px;\nmargin-left: ${Math.round(selection.offsetX)}px;`);
+      }
+    }
+    if (el.style.width || el.style.height) {
+      lines.push(`width: ${Math.round(rect.width)}px;\nheight: ${Math.round(rect.height)}px;`);
+    }
+    if (el.style.fontSize) {
+      lines.push(`font-size: ${el.style.fontSize};`);
+    }
+    const code = lines.length ? lines.join('\n') : '/* no changes made yet */';
+
+    resultCard = document.createElement('div');
+    resultCard.innerHTML = `
+      <div style="font-weight:600;margin-bottom:6px;">CSS for this element:</div>
+      <pre style="background:#111;padding:6px 8px;border-radius:4px;font-size:12px;margin:0 0 6px 0;white-space:pre-wrap;">${code}</pre>
+      <button id="lt-copy" style="font-size:12px;">Copy</button>
+      <button id="lt-dismiss" style="font-size:12px;margin-left:6px;">Dismiss</button>
+    `;
+    Object.assign(resultCard.style, {
+      position: 'fixed', top: Math.min(rect.bottom + 8, window.innerHeight - 200) + 'px',
+      left: Math.min(rect.left, window.innerWidth - 280) + 'px',
+      zIndex: 2147483647, background: '#1e1e1e', color: '#fff', padding: '10px 12px',
+      borderRadius: '8px', fontFamily: 'system-ui, sans-serif', boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+      maxWidth: '260px'
+    });
+    document.body.appendChild(resultCard);
+    resultCard.querySelector('#lt-copy').addEventListener('click', () => {
+      navigator.clipboard.writeText(code);
+      resultCard.querySelector('#lt-copy').textContent = 'Copied!';
+    });
+    resultCard.querySelector('#lt-dismiss').addEventListener('click', () => {
+      resultCard.remove(); resultCard = null;
+    });
+  }
+
+  // ---- 9. Teardown: revert every temp-touched element, remove all UI ----
+  function teardown() {
+    panel.remove();
+    highlightBox.remove();
+    toolbar.remove();
+    resizeHandle.remove();
+    if (resultCard) resultCard.remove();
+    document.removeEventListener('pointerdown', onPageTap, true);
+    document.removeEventListener('pointerup', onPageTapEnd, true);
+
+    document.querySelectorAll('[data-layout-tool-touched]').forEach(el => {
+      el.style.transform = '';
+      el.style.width = '';
+      el.style.height = '';
+      el.style.fontSize = '';
+      delete el.dataset.layoutToolTouched;
     });
 
     window.__layoutToolActive = false;
   }
 
-  // ---- 3. Hover highlighting ----
-  // A single reusable "highlight box" div we move around via inset positioning,
-  // rather than modifying the outline of the actual page elements (safer — never
-  // touches the host page's own styles).
-  const highlightBox = document.createElement('div');
-  Object.assign(highlightBox.style, {
-    position: 'fixed',
-    pointerEvents: 'none',
-    border: '2px solid #4f9dff',
-    background: 'rgba(79,157,255,0.15)',
-    zIndex: 2147483646,
-    display: 'none'
-  });
-  document.body.appendChild(highlightBox);
-
-  function isSelectable(el) {
-    return Object.keys(CATEGORIES).some(key =>
-      enabled[key] && el.matches(CATEGORIES[key].selector)
-    );
-  }
-
-  function onHover(e) {
-    const el = e.target;
-    if (el === panel || panel.contains(el) || el === highlightBox) {
-      highlightBox.style.display = 'none';
-      return;
-    }
-    if (!isSelectable(el)) {
-      highlightBox.style.display = 'none';
-      return;
-    }
-    const rect = el.getBoundingClientRect();
-    Object.assign(highlightBox.style, {
-      display: 'block',
-      top: rect.top + 'px',
-      left: rect.left + 'px',
-      width: rect.width + 'px',
-      height: rect.height + 'px'
-    });
-  }
-
-  document.addEventListener('mouseover', onHover);
-
-  // ---- 4. Drag-to-reposition, then read the NEW position ----
-  // Uses Pointer Events (not mouse events) so this works with mouse,
-  // touch (iPad/phone), and stylus through the same code path.
-  let resultCard = null;
-  let dragState = null; // { el, startX, startY, origRect, offsetX, offsetY }
-
-  function onPointerDown(e) {
-    const el = e.target;
-    if (el === panel || panel.contains(el)) return;
-    if (resultCard && (el === resultCard || resultCard.contains(el))) return;
-    if (!isSelectable(el)) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Explicitly kill native browser drag (images/links are draggable by
-    // default) and text selection — both can swallow our move events
-    // before our own drag logic sees them.
-    el.setAttribute('draggable', 'false');
-    document.body.style.userSelect = 'none';
-    // Stops iOS Safari from treating the gesture as a page-scroll instead
-    // of a drag — critical for touch devices.
-    el.style.touchAction = 'none';
-
-    // Route all subsequent pointer events to this element even if the
-    // finger/cursor moves off it mid-drag — required for touch to track
-    // correctly past the element's original bounds.
-    el.setPointerCapture(e.pointerId);
-
-    const origRect = el.getBoundingClientRect();
-    dragState = {
-      el,
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      origRect,
-      offsetX: 0,
-      offsetY: 0
-    };
-    console.log('[layout-tool] drag started on', el.tagName, el.className);
-
-    // Neutralize any transform the page itself might already use, so our
-    // drag offset is the only thing in play. We restore this on teardown.
-    if (!el.dataset.layoutToolOrigTransform) {
-      el.dataset.layoutToolOrigTransform = el.style.transform || '';
-    }
-    el.style.cursor = 'grabbing';
-
-    el.addEventListener('pointermove', onPointerMove);
-    el.addEventListener('pointerup', onPointerUp);
-    el.addEventListener('pointercancel', onPointerUp);
-  }
-
-  function onPointerMove(e) {
-    if (!dragState || e.pointerId !== dragState.pointerId) return;
-    dragState.offsetX = e.clientX - dragState.startX;
-    dragState.offsetY = e.clientY - dragState.startY;
-    dragState.el.style.transform =
-      `translate(${dragState.offsetX}px, ${dragState.offsetY}px)`;
-
-    // live-update the highlight box so it tracks the element while dragging
-    const rect = dragState.el.getBoundingClientRect();
-    Object.assign(highlightBox.style, {
-      display: 'block',
-      top: rect.top + 'px',
-      left: rect.left + 'px',
-      width: rect.width + 'px',
-      height: rect.height + 'px'
-    });
-  }
-
-  function onPointerUp(e) {
-    if (!dragState || e.pointerId !== dragState.pointerId) return;
-    const { el, origRect, offsetX, offsetY } = dragState;
-
-    el.removeEventListener('pointermove', onPointerMove);
-    el.removeEventListener('pointerup', onPointerUp);
-    el.removeEventListener('pointercancel', onPointerUp);
-    document.body.style.userSelect = '';
-    el.style.cursor = '';
-
-    console.log('[layout-tool] drag ended, offset:', offsetX, offsetY);
-
-    // Only treat it as a "move" if they actually dragged (a plain tap/click
-    // with ~0 movement just reads the current position instead).
-    const moved = Math.abs(offsetX) > 2 || Math.abs(offsetY) > 2;
-
-    const info = analyzeElement(el, origRect, offsetX, offsetY, moved);
-    showResultCard(el, info);
-
-    dragState = null;
-  }
-
-  document.addEventListener('pointerdown', onPointerDown, true);
-
-  function analyzeElement(el, origRect, offsetX, offsetY, moved) {
-    const style = getComputedStyle(el);
-    const position = style.position; // 'static', 'relative', 'absolute', 'fixed', 'sticky'
-    const isPositioned = position !== 'static';
-
-    // Target position = where they DRAGGED it to, not just where it started.
-    const raw = {
-      x: Math.round(origRect.left + offsetX),
-      y: Math.round(origRect.top + offsetY),
-      width: Math.round(origRect.width),
-      height: Math.round(origRect.height)
-    };
-
-    return { position, isPositioned, raw, moved };
-  }
-
-  function buildSnippet(info) {
-    if (info.isPositioned) {
-      // Case A: already positioned -> top/left is correct and will work directly
-      return {
-        label: '✅ This element is positioned (' + info.position + ') — use directly:',
-        code: `top: ${info.raw.y}px;\nleft: ${info.raw.x}px;`
-      };
-    }
-    // Case B: static (default flow) -> top/left would silently do nothing.
-    // Offer margin as the safe default.
-    return {
-      label: '⚠️ This element is not positioned (position: static).\nMargin is the safer option — it won\'t break the surrounding layout:',
-      code: `margin-top: ${info.raw.y}px;\nmargin-left: ${info.raw.x}px;`,
-      altLabel: 'Or, if you want absolute positioning instead (removes it from normal flow):',
-      altCode: `position: absolute;\ntop: ${info.raw.y}px;\nleft: ${info.raw.x}px;`
-    };
-  }
-
-  function showResultCard(el, info) {
-    if (resultCard) resultCard.remove();
-
-    const snippet = buildSnippet(info);
-    const rect = el.getBoundingClientRect();
-
-    resultCard = document.createElement('div');
-    resultCard.id = 'layout-tool-result';
-    resultCard.innerHTML = `
-      <div style="font-weight:600;margin-bottom:4px;">Selected: &lt;${el.tagName.toLowerCase()}${el.className ? '.' + String(el.className).split(' ')[0] : ''}&gt;</div>
-      <div style="font-size:11px;opacity:0.7;margin-bottom:4px;">${info.moved ? '📍 Position after your drag:' : '📍 Current position (no drag detected):'}</div>
-      <div style="font-size:12px;opacity:0.8;margin-bottom:6px;">x=${info.raw.x}, y=${info.raw.y}, w=${info.raw.width}, h=${info.raw.height}</div>
-      <div style="font-size:12px;white-space:pre-line;margin-bottom:4px;">${snippet.label}</div>
-      <pre style="background:#111;padding:6px 8px;border-radius:4px;font-size:12px;margin:0 0 6px 0;">${snippet.code}</pre>
-      <button class="layout-tool-copy" data-code="${encodeURIComponent(snippet.code)}" style="font-size:12px;">Copy</button>
-      ${snippet.altCode ? `
-        <div style="font-size:12px;white-space:pre-line;margin:8px 0 4px 0;">${snippet.altLabel}</div>
-        <pre style="background:#111;padding:6px 8px;border-radius:4px;font-size:12px;margin:0 0 6px 0;">${snippet.altCode}</pre>
-        <button class="layout-tool-copy" data-code="${encodeURIComponent(snippet.altCode)}" style="font-size:12px;">Copy</button>
-      ` : ''}
-      <button id="layout-tool-dismiss" style="font-size:12px;display:block;margin-top:6px;">Dismiss</button>
-    `;
-    Object.assign(resultCard.style, {
-      position: 'fixed',
-      top: Math.min(rect.bottom + 8, window.innerHeight - 220) + 'px',
-      left: Math.min(rect.left, window.innerWidth - 300) + 'px',
-      zIndex: 2147483647,
-      background: '#1e1e1e',
-      color: '#fff',
-      padding: '10px 12px',
-      borderRadius: '8px',
-      fontFamily: 'system-ui, sans-serif',
-      boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-      maxWidth: '280px'
-    });
-    document.body.appendChild(resultCard);
-
-    resultCard.querySelectorAll('.layout-tool-copy').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const code = decodeURIComponent(btn.dataset.code);
-        navigator.clipboard.writeText(code).then(() => {
-          btn.textContent = 'Copied!';
-          setTimeout(() => (btn.textContent = 'Copy'), 1200);
-        });
-      });
-    });
-    resultCard.querySelector('#layout-tool-dismiss').addEventListener('click', () => {
-      resultCard.remove();
-      resultCard = null;
-    });
-  }
-
-  console.log('Layout tool loaded. Hover to see selectable elements, click one to get its coordinates.');
+  console.log('Layout tool loaded. Tap an element to select it; tap the same spot again to reach layers underneath.');
 })();
