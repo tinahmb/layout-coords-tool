@@ -33,6 +33,18 @@
     font-weight: 600;
     cursor: grab;
   }
+  .copy-btn {
+    display: inline-block;
+    background: #1e1e1e;
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    font-size: 15px;
+  }
+  .copy-btn.copied { background: #2e7d32; }
   .bookmarklet-hint { font-size: 13px; color: #777; margin-top: 10px; }
 
   .alt-method { margin-top: 40px; }
@@ -43,6 +55,8 @@
     border-radius: 8px;
     overflow-x: auto;
     font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
   .steps { padding-left: 20px; }
   .steps li { margin-bottom: 6px; }
@@ -54,6 +68,7 @@
     border-radius: 6px;
     margin-top: 24px;
   }
+  #desktop-instructions, #touch-instructions { display: none; }
 </style>
 </head>
 <body>
@@ -61,27 +76,52 @@
   <h1>Layout Coords Tool</h1>
   <p class="sub">Drag elements to where they should be, get exact CSS coordinates, hand them to your AI. No install, no account, no risk — it never touches your codebase.</p>
 
-  <div class="bookmarklet-box">
-    <a class="bookmarklet-link" href="javascript:(function(){var s=document.createElement('script');s.src='https://layout-coords-tool.pages.dev/overlay.js?'+Date.now();document.body.appendChild(s);})();">
-      📐 Layout Coords Tool
-    </a>
-    <div class="bookmarklet-hint">
-      Drag this button to your bookmarks bar.<br/>
-      Later, click it on any page you're working on.
+  <!-- DESKTOP VERSION: drag-to-bookmarks-bar works here -->
+  <div id="desktop-instructions">
+    <div class="bookmarklet-box">
+      <a class="bookmarklet-link" id="bookmarklet-link" href="#">
+        📐 Layout Coords Tool
+      </a>
+      <div class="bookmarklet-hint">
+        Drag this button to your bookmarks bar.<br/>
+        Later, click it on any page you're working on.
+      </div>
     </div>
+
+    <ol class="steps">
+      <li>Drag the button above to your browser's bookmarks bar (not click — drag).</li>
+      <li>Open your own site or project (localhost, staging, wherever you're working).</li>
+      <li>Click the bookmark. A small panel appears on your page.</li>
+      <li>Drag any button or image to where you want it, drop it, and copy the CSS shown.</li>
+      <li>Paste that CSS into your code, or hand it to your AI coding agent.</li>
+      <li>Click "Remove tool" when done — nothing is left behind.</li>
+    </ol>
   </div>
 
-  <ol class="steps">
-    <li>Drag the button above to your browser's bookmarks bar (not click — drag).</li>
-    <li>Open your own site or project (localhost, staging, wherever you're working).</li>
-    <li>Click the bookmark. A small panel appears on your page.</li>
-    <li>Drag any button or image to where you want it, drop it, and copy the CSS shown.</li>
-    <li>Paste that CSS into your code, or hand it to your AI coding agent.</li>
-    <li>Click "Remove tool" when done — nothing is left behind.</li>
-  </ol>
+  <!-- TOUCH VERSION (iPad/iPhone): dragging to a bookmarks bar isn't possible,
+       so we use the copy-then-edit-a-bookmark method instead. -->
+  <div id="touch-instructions">
+    <div class="bookmarklet-box">
+      <button class="copy-btn" id="copy-code-btn">Copy bookmarklet code</button>
+      <div class="bookmarklet-hint">
+        There's no bookmarks bar to drag to on iPad — instead, copy the code above, then follow the steps below to turn it into a working bookmark.
+      </div>
+    </div>
+
+    <ol class="steps">
+      <li>Tap "Copy bookmarklet code" above.</li>
+      <li>Bookmark <em>any</em> page first (tap the Share icon → "Add Bookmark").</li>
+      <li>Go to your Bookmarks list (Book icon in Safari), swipe/tap "Edit" on the bookmark you just made.</li>
+      <li>Delete its URL, and paste the copied code in its place.</li>
+      <li>Rename it to "Layout Tool" so it's easy to find, then tap Done.</li>
+      <li>Now, whenever you're on your own site, open Bookmarks and tap "Layout Tool" — the panel appears.</li>
+      <li>Drag any button or image to where you want it, drop it, and copy the CSS shown.</li>
+      <li>Tap "Remove tool" when done — nothing is left behind.</li>
+    </ol>
+  </div>
 
   <div class="alt-method">
-    <h2 style="font-size:18px;">Prefer the console?</h2>
+    <h2 style="font-size:18px;">Prefer the console? (desktop only)</h2>
     <p style="font-size:14px;color:#555;">If you're already in DevTools, paste this into the Console on your own page instead:</p>
     <pre>var s = document.createElement('script');
 s.src = 'https://layout-coords-tool.pages.dev/overlay.js';
@@ -89,8 +129,38 @@ document.body.appendChild(s);</pre>
   </div>
 
   <div class="note">
-    ⚠️ <strong>Nothing is saved or installed.</strong> The tool only exists in the current browser tab. Refresh the page, or click "Remove tool," and it's completely gone — your project files are never touched.
+    ⚠️ <strong>Nothing is saved or installed.</strong> The tool only exists in the current browser tab. Refresh the page, or tap "Remove tool," and it's completely gone — your project files are never touched.
   </div>
+
+<script>
+  var BOOKMARKLET_CODE = "javascript:(function(){var s=document.createElement('script');s.src='https://layout-coords-tool.pages.dev/overlay.js?'+Date.now();document.body.appendChild(s);})();";
+
+  // Detect touch-primary devices (iPad, iPhone, most tablets) vs desktop.
+  // We check for a coarse pointer (finger) rather than a fine one (mouse),
+  // since some laptops have touchscreens too but still have a mouse/trackpad.
+  var isTouch = window.matchMedia('(pointer: coarse)').matches;
+
+  if (isTouch) {
+    document.getElementById('touch-instructions').style.display = 'block';
+  } else {
+    document.getElementById('desktop-instructions').style.display = 'block';
+    document.getElementById('bookmarklet-link').setAttribute('href', BOOKMARKLET_CODE);
+  }
+
+  var copyBtn = document.getElementById('copy-code-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', function () {
+      navigator.clipboard.writeText(BOOKMARKLET_CODE).then(function () {
+        copyBtn.textContent = 'Copied!';
+        copyBtn.classList.add('copied');
+        setTimeout(function () {
+          copyBtn.textContent = 'Copy bookmarklet code';
+          copyBtn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+  }
+</script>
 
 </body>
 </html>
